@@ -1470,8 +1470,8 @@ function private.MakeGuiConfig()
 		{ "Left",   "TEXT", lib.GetSetting("columnwidth.Left")  }, --40
 		{ "Buy/ea", "COIN", lib.GetSetting("columnwidth.Buy/ea"), { DESCENDING=true, DEFAULT=true } }, --85
 		{ "Bid/ea", "COIN", lib.GetSetting("columnwidth.Bid/ea"), { DESCENDING=true, DEFAULT=true } }, --85
-		{ "ilvl",   "INT", lib.GetSetting("columnwidth.ilvl"), { DESCENDING=true } },
 		{ "DPS",    "NUMBER", lib.GetSetting("columnwidth.DPS"), { DESCENDING=true } },
+		{ "ilvl",   "INT", lib.GetSetting("columnwidth.ilvl"), { DESCENDING=true } },
 		{ "Stam",   "INT", lib.GetSetting("columnwidth.Stam"), { DESCENDING=true } },    -- 11
 		{ "Spirit", "INT", lib.GetSetting("columnwidth.Spirit"), { DESCENDING=true } },  -- 12
 		{ "Int",    "INT", lib.GetSetting("columnwidth.Int"), { DESCENDING=true } },     -- 13 (Using probable key)
@@ -2018,43 +2018,38 @@ end
 --skipresults is boolean flag, If true, nothing gets added to the results list
 --returns true, value, profit when successful
 --returns false, reason when not
--- In SearchMain.lua, replace the entire lib.SearchItem function with this:
--- In SearchMain.lua, replace the entire lib.SearchItem function with this:
-
--- In SearchMain.lua, replace the entire lib.SearchItem function with this:
-
 function lib.SearchItem(searcherName, item, nodupes, skipresults)
-	if not private.hasDoneEnvCheck then
-		private.hasDoneEnvCheck = true -- Ensure this only runs once per session
-		print("|cff00ccff==============================================|r")
-		print("|cff00ccff           Running Final Debug Check          |r")
-		print("|cff00ccff==============================================|r")
-		if AUC_TooltipScanner or AUC_StatDatabase then
-			print("|cffff5555ENVIRONMENT CHECK: FAILED!|r The old scanner/database files are still being loaded. Please fully delete TooltipScanner.lua and StatDatabase.lua, and remove them from your Embed.xml file.")
-		else
-			print("|cff55ff55ENVIRONMENT CHECK: PASSED!|r Old scanner and database files were not found.")
-		end
+	if not searcherName or not item or #item == 0 then
+		return false, "Empty item data" -- More descriptive
+	end
+	if item[Const.SELLER] == UnitName("player") then
+		return false, "Blocked: Can't buy own auction"
+	end
+	local searcher = lib.Searchers[searcherName]
+	if not searcher then
+		return false, "Searcher not found: " .. tostring(searcherName)
 	end
 
-	if not searcherName or not item or #item == 0 then return false, "Empty item data" end
-	if item[Const.SELLER] == UnitName("player") then return false, "Blocked: Can't buy own auction" end
-	local searcher = lib.Searchers[searcherName]
-	if not searcher then return false, "Searcher not found: " .. tostring(searcherName) end
-
+	-- Apply pre-search filters
 	for filtername, filter in pairs(lib.Filters) do
 		if filter.Filter then
 			local dofilter, filterreturn = filter.Filter(item, searcherName)
-			if dofilter then return false, "Filter:" .. filtername .. ": " .. tostring(filterreturn) end
+			if dofilter then
+				return false, "Filter:" .. filtername .. ": " .. tostring(filterreturn)
+			end
 		end
 	end
 
 	local buyorbid, value, pct, reason = searcher.Search(item)
 
 	if buyorbid then
+		-- Apply post-search filters (after searcher.Search has run)
 		for filtername, filter in pairs(lib.Filters) do
 			if filter.PostFilter then
 				local dofilter, filterreturn = filter.PostFilter(item, searcherName, buyorbid)
-				if dofilter then return false, "Filtered by " .. filtername .. ": " .. tostring(filterreturn) end
+				if dofilter then
+					return false, "Filtered by " .. filtername .. ": " .. tostring(filterreturn)
+				end
 			end
 		end
 
@@ -2062,27 +2057,40 @@ function lib.SearchItem(searcherName, item, nodupes, skipresults)
 		if type(buyorbid) == "string" then
 			item["reason"] = (reason or searcher.tabname) .. ":" .. buyorbid
 			if buyorbid == "bid" then
-				if item[Const.AMHIGH] then return false, "Bid blocked: Already high bidder" end
+				if item[Const.AMHIGH] then
+					return false, "Bid blocked: Already high bidder"
+				end
 				cost = item[Const.PRICE]
-			else cost = item[Const.BUYOUT] end
-		else
+			else -- "buy"
+				cost = item[Const.BUYOUT]
+			end
+		else -- buyorbid is true (boolean) or a numerical value (not standard here but handling for completeness)
 			item["reason"] = reason or searcher.tabname
-			if item[Const.BUYOUT] and item[Const.BUYOUT] > 0 then cost = item[Const.BUYOUT]
+			if item[Const.BUYOUT] and item[Const.BUYOUT] > 0 then
+				cost = item[Const.BUYOUT]
 			elseif item[Const.PRICE] and item[Const.PRICE] > 0 then
 				cost = item[Const.PRICE]
-				if item[Const.AMHIGH] then return false, "Bid blocked: Already high bidder" end
+				if item[Const.AMHIGH] then
+					return false, "Bid blocked: Already high bidder"
+				end
 			end
 		end
 
 		if not value then
 			local market = AucAdvanced.API.GetMarketValue(item[Const.LINK])
-			if market then value = (item[Const.COUNT] or 1) * market end
+			if market then
+				value = (item[Const.COUNT] or 1) * market
+			end
 		end
-		value = value or 0
+		value = value or 0 -- Ensure value is a number
 
-		if not cost or cost <= 0 then return false, "Action blocked: No valid price" end
+		if not cost or cost <= 0 then -- Ensure cost is valid
+			return false, "Action blocked: No valid price (buyout/bid) for item or price is zero/negative"
+		end
+
 		item["profit"] = value - cost
 
+		-- Check purchase conditions (maxprice, reserve)
 		local enablemax = lib.GetSetting("maxprice.enable")
 		local maxprice = lib.GetSetting("maxprice") or 10000000
 		local enableres = lib.GetSetting("reserve.enable")
@@ -2091,61 +2099,106 @@ function lib.SearchItem(searcherName, item, nodupes, skipresults)
 		local balance = GetMoney() - bidqueue
 
 		if (cost <= maxprice or not enablemax) and ((balance - cost) > reserve or not enableres) then
-			if not skipresults then
-				local item_level_value = item[Const.ILEVEL] or 0
-				local dps_value, stam_value, spirit_value, int_value, str_value, agi_value, armor_value = 0,0,0,0,0,0,0
-				
-				if lib.GetSetting("general.showstats.enable") then
-					local itemLink = item[Const.LINK]
-					if itemLink then
-						print("|cffffff00API CALL: Using GetItemStats() for ->|r", itemLink)
-						local fetchedStats = GetItemStats(itemLink)
-						
-						if fetchedStats and type(fetchedStats) == "table" then
-							print("|cff55ff55API RESULT: SUCCESS!|r GetItemStats() returned a data table. Stats found:")
-							for k,v in pairs(fetchedStats) do
-								print("  - StatKey: [" .. tostring(k) .. "], Value: [" .. tostring(v) .. "]")
+			-- Dupe check (simplified, as per original)
+			local isdupe = false
+			if not nodupes then
+				-- Simplified dupe check logic would go here if it existed
+			end
+
+			if nodupes or (not isdupe) then
+				-- PriceLevel coloring
+				local calculated_pct = pct
+				if not calculated_pct and AucAdvanced.Modules.Util.PriceLevel then
+					local level, _, r, g, b
+					local valueper_for_pricelevel = (value > 0 and item[Const.COUNT] and item[Const.COUNT] > 0) and (value / item[Const.COUNT]) or nil
+					local price_for_pricelevel = item[Const.PRICE]
+					local buyout_for_pricelevel = item[Const.BUYOUT]
+					if buyorbid == "bid" then
+						level, _, r, g, b = AucAdvanced.Modules.Util.PriceLevel.CalcLevel(item[Const.LINK], item[Const.COUNT], price_for_pricelevel, price_for_pricelevel, valueper_for_pricelevel)
+					else
+						local comparison_price = (buyout_for_pricelevel and buyout_for_pricelevel > 0) and buyout_for_pricelevel or price_for_pricelevel
+						level, _, r, g, b = AucAdvanced.Modules.Util.PriceLevel.CalcLevel(item[Const.LINK], item[Const.COUNT], price_for_pricelevel, comparison_price, valueper_for_pricelevel)
+					end
+					r, g, b = r or 1, g or 1, b or 1 -- Default to white if nil
+					local total_rows = #private.sheetData + 1
+					if not private.sheetStyle[total_rows] then private.sheetStyle[total_rows] = {} end
+					if not private.sheetStyle[total_rows][1] then private.sheetStyle[total_rows][1] = {} end
+					private.sheetStyle[total_rows][1].textColor = {r, g, b}
+					calculated_pct = floor(level or 0)
+				end
+				item["pct"] = tonumber(calculated_pct or pct) -- Ensure pct is a number
+				item["cost"] = cost
+
+				if not skipresults then
+					-- START of MODIFICATION
+					-- Initialize stat values. They will remain 0 if the checkbox is disabled.
+					local item_level_value = item[Const.ILEVEL] or 0
+					local dps_value, stam_value, spirit_value, int_value, str_value, agi_value, armor_value = 0,0,0,0,0,0,0
+
+					-- Check the setting from SearcherGeneral. If enabled, fetch stats.
+					if lib.GetSetting("general.showstats.enable") then
+						local itemLink = item[Const.LINK]
+						if itemLink then
+							local fetchedStats = GetItemStats(itemLink)
+							if fetchedStats and type(fetchedStats) == "table" then
+								-- Populate individual stats, defaulting to 0 if not present.
+								stam_value = tonumber(fetchedStats["ITEM_MOD_STAMINA_SHORT"]) or 0
+								spirit_value = tonumber(fetchedStats["ITEM_MOD_SPIRIT_SHORT"]) or 0
+								int_value = tonumber(fetchedStats["ITEM_MOD_INTELLECT_SHORT"]) or 0
+								str_value = tonumber(fetchedStats["ITEM_MOD_STRENGTH_SHORT"]) or 0
+								agi_value = tonumber(fetchedStats["ITEM_MOD_AGILITY_SHORT"]) or 0
+								armor_value = tonumber(fetchedStats["RESISTANCE0_NAME"]) or 0
+
+								-- DPS calculation specifically for weapons
+								if item[Const.CLASSID] == LE_ITEM_CLASS_WEAPON then
+									dps_value = tonumber(fetchedStats["ITEM_MOD_DAMAGE_PER_SECOND_SHORT"]) or 0
+								end
 							end
-							stam_value = tonumber(fetchedStats["ITEM_MOD_STAMINA_SHORT"]) or 0
-							spirit_value = tonumber(fetchedStats["ITEM_MOD_SPIRIT_SHORT"]) or 0
-							int_value = tonumber(fetchedStats["ITEM_MOD_INTELLECT_SHORT"]) or 0
-							str_value = tonumber(fetchedStats["ITEM_MOD_STRENGTH_SHORT"]) or 0
-							agi_value = tonumber(fetchedStats["ITEM_MOD_AGILITY_SHORT"]) or 0
-							armor_value = tonumber(fetchedStats["RESISTANCE0_NAME"]) or 0
-							if item[Const.CLASSID] == LE_ITEM_CLASS_WEAPON then
-								dps_value = tonumber(fetchedStats["ITEM_MOD_DAMAGE_PER_SECOND_SHORT"]) or 0
-							end
-						else
-							print("|cffff5555API RESULT: FAILED!|r GetItemStats() did not return data for this item.")
 						end
 					end
-				end
+					-- END of MODIFICATION
 
-				local count = item[Const.COUNT] or 1
-				local buy = item[Const.BUYOUT] or 0
-				local bid_price = item[Const.PRICE] or 0
+					local count = item[Const.COUNT] or 1
+					local buy = item[Const.BUYOUT] or 0
+					local bid_price = item[Const.PRICE] or 0
 
-				local rowDataToDisplay = {
-					item[Const.LINK], count, buy, bid_price, item[Const.SELLER],
-					private.tleft[item[Const.TLEFT]],
-					(buy > 0 and count > 0) and (buy / count) or nil,
-					(bid_price > 0 and count > 0) and (bid_price / count) or nil,
-					item_level_value, dps_value, stam_value, spirit_value,
-					int_value, str_value, agi_value, armor_value
-				}
-				tinsert(private.sheetData, rowDataToDisplay)
+					local rowDataToDisplay = {
+						item[Const.LINK],                         -- 1
+						count,                                    -- 2 (Stk)
+						buy,                                      -- 3 (Buyout)
+						bid_price,                                -- 4 (Bid)
+						item[Const.SELLER],                       -- 5
+						private.tleft[item[Const.TLEFT]],         -- 6 (Left)
+						(buy > 0 and count > 0) and (buy / count) or nil,         -- 7 (Buy/ea)
+						(bid_price > 0 and count > 0) and (bid_price / count) or nil, -- 8 (Bid/ea)
+						dps_value,                                -- 9 (DPS)
+						item_level_value,                         -- 10 (ilvl)
+						stam_value,                               -- 11
+						spirit_value,                             -- 12
+						int_value,                                -- 13
+						str_value,                                -- 14
+						agi_value,                                -- 15
+						armor_value                               -- 16
+					}
+					tinsert(private.sheetData, rowDataToDisplay)
 
-				if not private.sheetAuxData then private.sheetAuxData = {} end
-				private.sheetAuxData[#private.sheetData] = {
-					reason = item["reason"],
-					minbid = item[Const.MINBID] or 0,
-					curbid = item[Const.CURBID] or 0
-				}
-			end
-			return true, item["profit"], value
+					-- Store auxiliary data (reason, minbid, curbid)
+					if not private.sheetAuxData then private.sheetAuxData = {} end
+					private.sheetAuxData[#private.sheetData] = {
+						reason = item["reason"],
+						minbid = item[Const.MINBID] or 0,
+						curbid = item[Const.CURBID] or 0
+					}
+				end -- end if not skipresults
+				return true, item["profit"], value
+			end -- end if nodupes or (not isdupe)
+		elseif cost > maxprice and enablemax then
+			return false, "Price higher than maxprice"
+		else -- Balance lower than reserve or other condition not met
+			return false, "Balance lower than reserve or other unmet condition"
 		end
 	end
-	return false, value
+	return false, value -- Return original 'value' if buyorbid was nil, or specific reason if set
 end
 
 local PerformSearch = function(item)
